@@ -1,4 +1,4 @@
-# Experimental logback appender for OMS
+# Experimental logback appender for Log analytics (OMS)
 This **experimental** appender collects data from logback and in async way sends data to OMS REST API for processing.
 
 ## How to compile and test
@@ -7,6 +7,8 @@ This **experimental** appender collects data from logback and in async way sends
 * than go to directory `testapp`
 * update file `./src/main/resources/logback.xml` 
   * enter valid `customerId` and `sharedKey` - vaules depends on your deployed OMS instance
+  * eventually define different batch size for uploading to Log Analytics in `batchSize`
+  * create directory for temporary log files (in case when Log Analytics REST API is not accessible appender will save serialized messages to filesystem and sends these files when Log Analytics become available), enter valid path to `tempPath` 
 
 ```xml
 <configuration>
@@ -21,6 +23,8 @@ This **experimental** appender collects data from logback and in async way sends
         <customerId>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</customerId>
         <sharedKey>xxxxxxxxxxxxxxx==</sharedKey>
         <logType>LogBack</logType>
+        <batchSize>1000</batchSize>
+        <tempPath>/tmp/oms</tempPath>
     </appender>
     <root level="debug">
         <appender-ref ref="STDOUT" />

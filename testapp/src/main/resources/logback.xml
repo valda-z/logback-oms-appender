@@ -9,9 +9,11 @@
     </appender>
 
     <appender name="OMS" class="com.microsoft.valda.oms.OmsAppender">
-        <customerId>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</customerId>
-        <sharedKey>xxxxxxxxxxxxxxx==</sharedKey>
+        <customerId>########-####-####-####-############</customerId>
+        <sharedKey>XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX==</sharedKey>
         <logType>LogBack</logType>
+        <batchSize>1000</batchSize>
+        <tempPath>/tmp/oms</tempPath>
     </appender>
 
     <root level="debug">

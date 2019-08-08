@@ -5,28 +5,44 @@ import ch.qos.logback.classic.spi.ThrowableProxyUtil;
 import ch.qos.logback.core.AppenderBase;
 import ch.qos.logback.core.status.ErrorStatus;
 import org.apache.commons.codec.binary.Base64;
+import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import javax.net.ssl.HttpsURLConnection;
 import javax.xml.bind.DatatypeConverter;
 import javax.xml.ws.http.HTTPException;
+
+import java.io.Console;
 import java.io.DataOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
 import java.net.InetAddress;
 import java.net.URL;
 import java.net.UnknownHostException;
+import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
+import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Created by vazvadsk on 2017-04-22.
@@ -56,6 +72,9 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
     private String customerId = null;
     private String sharedKey = null;
     private String logType = null;
+    private Integer batchSize = 1000;
+    private String tempPath = "";
+    private Boolean tempFileExists = true;
 
     static {
         try {
@@ -80,7 +99,16 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
             try {
                 LoggingEvent event = loggingEventQueue.poll(1L, TimeUnit.SECONDS);
                 if (event != null) {
-                    instance.processEvent(event);
+                    List<LoggingEvent> events = new ArrayList<LoggingEvent>();
+                    events.add(event);
+                    for(int i=1; i<instance.batchSize; i++){
+                        LoggingEvent evt = loggingEventQueue.poll();
+                        if(evt == null){
+                            break;
+                        }
+                        events.add(evt);
+                    }
+                    instance.processEvent(events);
                 }
             }
             catch (InterruptedException e) {
@@ -97,12 +125,33 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
         loggingEventQueue.add(loggingEvent);
     }
 
-    private void processEvent(LoggingEvent event) {
+    private void processEvent(List<LoggingEvent> events) {
+        System.out.println(">>>>>>>>>>>>> queuelen: " + loggingEventQueue.size());
+        MyLogBatch data = prepareBatch(events);
         try {
-            sendLog(event);
+            // send to Log Analytics
+            sendLogToOMS(data.getJson(), data.getLastTimestamp());
+
+            // is there any temp files?
+            if(tempFileExists){
+                sendTempFiles();
+            }
         }
         catch (Exception e) {
-            addStatus(new ErrorStatus("Failed to process", this, e));
+            // if we cannot send to Log Analytics let's store in file
+            try {
+                // store to file
+                String fname = instance.getTempPath() + "/" +
+                    UUID.randomUUID().toString() + "_" + data.getFileLastTimestamp();
+
+                Files.write(Paths.get(fname), data.getJson().getBytes("UTF-8"));
+
+                // signalize, that we have to send it later on
+                tempFileExists = true;
+            }
+            catch (Exception ie) {
+                addStatus(new ErrorStatus("Failed to process", this, ie));
+            }
         }
     }
 
@@ -111,32 +160,111 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
         super.stop();
     }
 
-    private void sendLog(LoggingEvent event) throws NoSuchAlgorithmException, InvalidKeyException, IOException, HTTPException {
+    private void sendTempFiles() {
+        System.out.println(">>>>>>>>>>>>> goingto-sendfile" );
+
+        // walk throw dir with temp files
+        try (Stream<Path> walk = Files.walk(Paths.get(tempPath))) {
+
+            List<String> result = walk.filter(Files::isRegularFile)
+                    .map(x -> x.toString()).collect(Collectors.toList());
+    
+            for(int i=0; i<result.size(); i++){
+                MyLogBatch batch = new MyLogBatch();
+
+                System.out.println(">>>>>>>>>>>>> sendfile: " + result.get(i));
+
+                // read file and prepare object
+                String pText = "";
+
+                if(result.get(i).length()>32){
+                    pText = result.get(i).substring(result.get(i).length()-17);
+                    batch.setLastTimestampFromFile(pText);
+
+                    batch.setJson(
+                        new String(Files.readAllBytes(Paths.get(result.get(i))), Charset.forName("UTF-8")));
+                }
+                
+                if(pText.length()>0 && isJSONValid(batch.getJson())){
+                    // send to Log Analytics
+                    sendLogToOMS(batch.getJson(), batch.getLastTimestamp());
+                    System.out.println(">>>>>>>>>>>>> sendfile: OK");
+                }
+
+                // delete file
+                Files.delete(Paths.get(result.get(i)));
+            }
+
+            // all files processed
+            tempFileExists = false;
+    
+        } catch (Exception e) {
+            System.out.println(">>>>>>>>>>>>> sendfileexc: " + e.getMessage());
+            e.printStackTrace();
+            addStatus(new ErrorStatus("Failed to process temp files", this, e));
+        }
+    }
+
+    public boolean isJSONValid(String test) {
+        JSONParser parser = new JSONParser();
+        try {
+            JSONArray jsonObject = (JSONArray) parser.parse(test);
+        } catch (Exception ex) {
+            try {
+                JSONObject jsonObject = (JSONObject) parser.parse(test);
+            } catch (Exception ex1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private MyLogBatch prepareBatch(List<LoggingEvent> events){
+
+        MyLogBatch ret = new MyLogBatch();
+
         //create JSON message
-        JSONObject obj = new JSONObject();
-        obj.put("LOGBACKLoggerName", event.getLoggerName());
-        obj.put("LOGBACKLogLevel", event.getLevel().toString());
-        obj.put("LOGBACKMessage", event.getFormattedMessage());
-        obj.put("LOGBACKThread", event.getThreadName());
-        if (event.getCallerData()!=null && event.getCallerData().length>0) {
-            obj.put("LOGBACKCallerData", event.getCallerData()[0].toString());
+        JSONArray arr = new JSONArray();
+        Date lastTimeStamp = null;
+        SimpleDateFormat dateFormatISO = new SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
+        dateFormatISO.setTimeZone(TimeZone.getTimeZone("GMT"));
+        for(int i=0; i< events.size(); i++){
+            LoggingEvent event = events.get(i);
+            event.prepareForDeferredProcessing();
+            lastTimeStamp = new Date(event.getTimeStamp());
+            JSONObject obj = new JSONObject();
+            obj.put("LOGBACKTimeStamp", dateFormatISO.format(lastTimeStamp));
+            obj.put("LOGBACKLoggerName", event.getLoggerName());
+            obj.put("LOGBACKLogLevel", event.getLevel().toString());
+            obj.put("LOGBACKMessage", event.getFormattedMessage());
+            obj.put("LOGBACKThread", event.getThreadName());
+            if (event.getCallerData()!=null && event.getCallerData().length>0) {
+                obj.put("LOGBACKCallerData", event.getCallerData()[0].toString());
+            }
+            else {
+                obj.put("LOGBACKCallerData", "");
+            }
+            if (event.getThrowableProxy()!=null) {
+                obj.put("LOGBACKStackTrace", ThrowableProxyUtil.asString(event.getThrowableProxy()));
+            }
+            else {
+                obj.put("LOGBACKStackTrace", "");
+            }
+            if (inetAddress != null) {
+                obj.put("LOGBACKIPAddress", inetAddress.getHostAddress());
+            }
+            else {
+                obj.put("LOGBACKIPAddress", "0.0.0.0");
+            }
+            arr.add(obj);
         }
-        else {
-            obj.put("LOGBACKCallerData", "");
-        }
-        if (event.getThrowableProxy()!=null) {
-            obj.put("LOGBACKStackTrace", ThrowableProxyUtil.asString(event.getThrowableProxy()));
-        }
-        else {
-            obj.put("LOGBACKStackTrace", "");
-        }
-        if (inetAddress != null) {
-            obj.put("LOGBACKIPAddress", inetAddress.getHostAddress());
-        }
-        else {
-            obj.put("LOGBACKIPAddress", "0.0.0.0");
-        }
-        String json = obj.toJSONString();
+        ret.setJson(arr.toJSONString());
+        ret.setLastTimestamp(lastTimeStamp);
+        return ret;
+    }
+
+    private void sendLogToOMS(String json, Date timestamp) throws NoSuchAlgorithmException, InvalidKeyException, IOException, HTTPException{
 
         String Signature = "";
         String encodedHash = "";
@@ -148,6 +276,12 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
                 "EEE, dd MMM yyyy HH:mm:ss z", Locale.US);
         dateFormat.setTimeZone(TimeZone.getTimeZone("GMT"));
         String timeNow = dateFormat.format(calendar.getTime());
+
+        // Timestamp for time-generated-field
+        SimpleDateFormat dateFormatISO = new SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
+        dateFormatISO.setTimeZone(TimeZone.getTimeZone("GMT"));
+        String timeGenerated = dateFormatISO.format(timestamp);
 
         // String for signing the key
         String stringToSign="POST\n" + json.length() + "\napplication/json\nx-ms-date:"+timeNow+"\n/api/logs";
@@ -167,6 +301,7 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
         con.setRequestProperty("Content-Type", "application/json");
         con.setRequestProperty("Log-Type",logType);
         con.setRequestProperty("x-ms-date", timeNow);
+        con.setRequestProperty("time-generated-field", timeGenerated);
         con.setRequestProperty("Authorization", Signature);
 
         DataOutputStream wr = new DataOutputStream(con.getOutputStream());
@@ -175,6 +310,7 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
         wr.close();
 
         int responseCode = con.getResponseCode();
+        System.out.println(">>>>>>>>>>>>> responseCode: " + responseCode);
         if(responseCode != 200){
             throw new HTTPException(responseCode);
         }
@@ -202,5 +338,25 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
 
     public void setLogType(String logType) {
         this.logType = logType;
+    }
+
+    public Integer getBatchSize() {
+        return batchSize;
+    }
+
+    public void setBatchSize(Integer batchSize) {
+        this.batchSize = batchSize;
+    }
+
+    public String getTempPath() {
+        return tempPath;
+    }
+
+    public void setTempPath(String tempPath) {
+        this.tempPath = tempPath;
+        //if ends with / lets sanitize ..
+        if(this.tempPath.endsWith("/")){
+            this.tempPath = this.tempPath.substring(0, this.tempPath.length()-1);
+        }
     }
 }
