@@ -126,7 +126,6 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
     }
 
     private void processEvent(List<LoggingEvent> events) {
-        System.out.println(">>>>>>>>>>>>> queuelen: " + loggingEventQueue.size());
         MyLogBatch data = prepareBatch(events);
         try {
             // send to Log Analytics
@@ -161,7 +160,6 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
     }
 
     private void sendTempFiles() {
-        System.out.println(">>>>>>>>>>>>> goingto-sendfile" );
 
         // walk throw dir with temp files
         try (Stream<Path> walk = Files.walk(Paths.get(tempPath))) {
@@ -171,8 +169,6 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
     
             for(int i=0; i<result.size(); i++){
                 MyLogBatch batch = new MyLogBatch();
-
-                System.out.println(">>>>>>>>>>>>> sendfile: " + result.get(i));
 
                 // read file and prepare object
                 String pText = "";
@@ -188,7 +184,6 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
                 if(pText.length()>0 && isJSONValid(batch.getJson())){
                     // send to Log Analytics
                     sendLogToOMS(batch.getJson(), batch.getLastTimestamp());
-                    System.out.println(">>>>>>>>>>>>> sendfile: OK");
                 }
 
                 // delete file
@@ -199,7 +194,6 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
             tempFileExists = false;
     
         } catch (Exception e) {
-            System.out.println(">>>>>>>>>>>>> sendfileexc: " + e.getMessage());
             e.printStackTrace();
             addStatus(new ErrorStatus("Failed to process temp files", this, e));
         }
@@ -310,7 +304,6 @@ public class OmsAppender  extends AppenderBase<LoggingEvent> {
         wr.close();
 
         int responseCode = con.getResponseCode();
-        System.out.println(">>>>>>>>>>>>> responseCode: " + responseCode);
         if(responseCode != 200){
             throw new HTTPException(responseCode);
         }
